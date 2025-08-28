@@ -1,0 +1,9 @@
+apiVersion: learning.aca.com/v1alpha1
+kind: BlueGreenDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: bg-deployment-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: bluegreendeployment-sample
+spec:
+  # TODO(user): Add fields here

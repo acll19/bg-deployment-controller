@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- learning_v1alpha1_bluegreendeployment.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
