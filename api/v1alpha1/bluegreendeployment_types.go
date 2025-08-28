@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -30,16 +32,52 @@ type BlueGreenDeploymentSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of BlueGreenDeployment. Edit bluegreendeployment_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	// +kubebuilder:validation:Required
+	Deployment DeploymentSpec `json:"deployment"`
+
+	// +kubebuilder:validation:Required
+	Service ServiceSpec `json:"service"`
+}
+
+type DeploymentSpec struct {
+	appsv1.DeploymentSpec `json:",inline"`
+}
+
+type ServiceSpec struct {
+	corev1.ServiceSpec `json:",inline"`
 }
 
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment.
 type BlueGreenDeploymentStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Phase      BlueGreenPhase     `json:"phase,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
+
+type BlueGreenPhase string
+
+const (
+	// PhasePending means the CR has been created but no deployments/services exist yet.
+	PhasePending BlueGreenPhase = "Pending"
+
+	// PhaseDeploying means the active deployment/service are being created or updated.
+	// The controller waits until the deployment pods are ready.
+	PhaseDeploying BlueGreenPhase = "Deploying"
+
+	// PhaseRunTests means the new deployment is ready and tests should be executed.
+	PhaseRunTests BlueGreenPhase = "RunTests"
+
+	// PhasePromoting means the service is being switched to point to the new deployment.
+	PhasePromoting BlueGreenPhase = "Promoting"
+
+	// PhaseCleaningUp means old/inactive deployments and services are being deleted.
+	PhaseCleaningUp BlueGreenPhase = "CleaningUp"
+
+	// PhaseSucceeded means rollout is complete and system is stable.
+	PhaseSucceeded BlueGreenPhase = "Succeeded"
+
+	// PhaseFailed means tests failed. The new deployment remains inactive for debugging.
+	PhaseFailed BlueGreenPhase = "Failed"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
