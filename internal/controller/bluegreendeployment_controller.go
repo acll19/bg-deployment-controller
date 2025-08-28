@@ -22,8 +22,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"aca.com/bg-deployment-controller/api/v1alpha1"
 	learningv1alpha1 "aca.com/bg-deployment-controller/api/v1alpha1"
 )
 
@@ -50,9 +53,9 @@ type BlueGreenDeploymentReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	log.Info("Reconciliation triggered")
 
 	return ctrl.Result{}, nil
 }
@@ -61,6 +64,31 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&learningv1alpha1.BlueGreenDeployment{}).
+		WithEventFilter(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				newObj := e.ObjectNew.(*v1alpha1.BlueGreenDeployment)
+				oldObj := e.ObjectOld.(*v1alpha1.BlueGreenDeployment)
+				// Only enqueue reconcile if status has changed
+				if newObj.Status.Phase != oldObj.Status.Phase {
+					switch newObj.Status.Phase {
+					case v1alpha1.PhasePending,
+						v1alpha1.PhaseDeploying,
+						v1alpha1.PhasePromoting:
+						return true
+					default:
+						return false
+					}
+				}
+
+				return false
+			},
+			CreateFunc: func(e event.CreateEvent) bool {
+				return true // always run on new CRs
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				return false
+			},
+		}).
 		Named("bluegreendeployment").
 		Complete(r)
 }
