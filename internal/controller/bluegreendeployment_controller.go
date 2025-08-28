@@ -28,7 +28,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"aca.com/bg-deployment-controller/api/v1alpha1"
 	learningv1alpha1 "aca.com/bg-deployment-controller/api/v1alpha1"
 )
 
@@ -70,14 +69,14 @@ func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&corev1.Service{}).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				newObj := e.ObjectNew.(*v1alpha1.BlueGreenDeployment)
-				oldObj := e.ObjectOld.(*v1alpha1.BlueGreenDeployment)
+				newObj := e.ObjectNew.(*learningv1alpha1.BlueGreenDeployment)
+				oldObj := e.ObjectOld.(*learningv1alpha1.BlueGreenDeployment)
 				// Only enqueue reconcile if status has changed
 				if newObj.Status.Phase != oldObj.Status.Phase {
 					switch newObj.Status.Phase {
-					case v1alpha1.PhasePending,
-						v1alpha1.PhaseDeploying,
-						v1alpha1.PhasePromoting:
+					case learningv1alpha1.PhasePending,
+						learningv1alpha1.PhaseDeploying,
+						learningv1alpha1.PhasePromoting:
 						return true
 					default:
 						return false
