@@ -18,10 +18,14 @@ package controller
 
 import (
 	"context"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -57,8 +61,279 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	log := logf.FromContext(ctx)
 
 	log.Info("Reconciliation triggered")
+	bgd := learningv1alpha1.BlueGreenDeployment{}
+
+	err := r.Get(ctx, req.NamespacedName, &bgd)
+
+	if errors.IsNotFound(err) {
+		return ctrl.Result{}, nil
+	}
+
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	switch bgd.Status.Phase {
+	case "",
+		learningv1alpha1.PhasePending:
+		// create active deploy and svc
+		// set phase to Pending
+		// return
+		log.Info("creating deployment")
+		active := false
+		color := "blue"
+		d := r.deploymentForBGD(&bgd, color, active)
+		err = r.Create(ctx, &d)
+		if err != nil {
+			log.Error(err, "unable to create deployment")
+			return ctrl.Result{}, err
+		}
+
+		log.Info("creating service")
+		s := r.serviceForBGD(&bgd, color, active)
+		err = r.Create(ctx, &s)
+		if err != nil {
+			log.Error(err, "unable to create service")
+			return ctrl.Result{}, err
+		}
+		bgd.Status.Phase = learningv1alpha1.PhaseDeploying
+		// TODO: update conditions
+	case learningv1alpha1.PhaseDeploying:
+		// check status of the deploy and svc
+		// if ready, change phase to Deploying
+		// return
+		active := false
+		deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
+		if err != nil {
+			log.Error(err, "unable to fetch blue deployment for BGD")
+			return ctrl.Result{}, err
+		}
+
+		if len(deploys.Items) == 0 {
+			// TODO: recreate the deployment. This should not happen.
+			log.Error(err, "no deployments found for BGD")
+			return ctrl.Result{}, nil
+		}
+
+		services, err := r.listServicesForBGD(ctx, &bgd, "blue")
+
+		if len(services.Items) == 0 {
+			// TODO: recreate the service. This should not happen.
+			log.Error(err, "no services found for BGD")
+			return ctrl.Result{}, nil
+		}
+
+		deploy := deploys.Items[0]
+		service := services.Items[0]
+		// Check service readiness based on type
+		serviceReady := false
+		switch service.Spec.Type {
+		case corev1.ServiceTypeLoadBalancer:
+			serviceReady = r.checkLoadBalancerServiceTypeStatus(service)
+		case corev1.ServiceTypeClusterIP:
+			serviceReady = r.checkClusterIpServiceTypeStatus(service)
+		case corev1.ServiceTypeNodePort:
+			serviceReady = r.checkNodePortServiceTypeStatus(service)
+		case corev1.ServiceTypeExternalName:
+			serviceReady = r.checkExternalNameServiceTypeStatus(service)
+		}
+
+		// Check if we trigger promotion
+		if serviceReady && deploy.Status.ReadyReplicas == *deploy.Spec.Replicas {
+			bgd.Status.Phase = learningv1alpha1.PhaseRunTests
+		}
+		// TODO: update conditions
+
+	case learningv1alpha1.PhasePromoting: // after tests are done
+		// update live svc selector to point to new deploy
+		// update new deploy label to active (or live?)
+		// update former active deploy label to inactive
+		// if promotion has gone will, change phase to cleanup
+		// check if there is an active deployment already
+		active := true
+		activeDeploys, err := r.fetchDeployments(ctx, bgd, active)
+		if err != nil {
+			log.Error(err, "unable to fetch active deployment for BGD")
+			return ctrl.Result{}, err
+		}
+
+		var activeD *appsv1.Deployment
+		if activeDeploys.Size() > 0 {
+			activeD = &activeDeploys.Items[0]
+			activeD.Labels["cleanup"] = "true" // mark for cleanup
+		}
+
+		active = false
+		inactiveDeploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
+		if err != nil {
+			log.Error(err, "unable to fetch blue deployment for BGD")
+			return ctrl.Result{}, err
+		}
+
+		var deployToPromote *appsv1.Deployment
+		for _, d := range inactiveDeploys.Items {
+			if d.Labels["cleanup"] != "true" {
+				deployToPromote = &d
+				break
+			}
+		}
+
+		if deployToPromote == nil {
+			// TODO: recreate the deployment. This should not happen.
+			err := errors.NewNotFound(appsv1.Resource("deployments"), "no matching deployment found to promote")
+			log.Error(err, "unable to find deployment to promote for BGD")
+			return ctrl.Result{}, err
+		}
+
+		deployToPromote.Labels["active"] = "true"
+		deployToPromote.Labels["color"] = "green"
+
+		// Execute all updates in a transaction-like manner
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if activeD != nil {
+				if err := r.Update(ctx, activeD); err != nil {
+					return err
+				}
+			}
+			if deployToPromote != nil {
+				if err := r.Update(ctx, deployToPromote); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			log.Error(err, "failed to update deployments during promotion")
+			return ctrl.Result{}, err
+		}
+
+		bgd.Status.Phase = learningv1alpha1.PhaseCleaningUp
+		// TODO: update conditions
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		err = r.Get(ctx, req.NamespacedName, &bgd)
+		if err != nil {
+			log.Error(err, "unable to fetch BGD for status update")
+			return err
+		}
+
+		err = r.Status().Update(ctx, &bgd)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Error(err, "unable to update BGD status after retries")
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *BlueGreenDeploymentReconciler) fetchDeployments(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
+	activeDeploys := appsv1.DeploymentList{}
+	activeDeploysSelector := client.MatchingLabels{"app": bgd.Name, "active": strconv.FormatBool(active)}
+	err := r.List(ctx, &activeDeploys, activeDeploysSelector)
+	return activeDeploys, err
+}
+
+func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
+	deploys := appsv1.DeploymentList{}
+	labelSelector := client.MatchingLabels{"app": bgd.Name, "active": strconv.FormatBool(active)}
+	err := r.List(ctx, &deploys, labelSelector)
+	if err != nil {
+		return deploys, err
+	}
+	return deploys, nil
+}
+
+func (r *BlueGreenDeploymentReconciler) listServicesForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, color string) (corev1.ServiceList, error) {
+	services := corev1.ServiceList{}
+	labelSelector := client.MatchingLabels{"app": bgd.Name, "color": color}
+	err := r.List(ctx, &services, labelSelector)
+	if err != nil {
+		return services, err
+	}
+	return services, nil
+}
+
+// For LoadBalancer, we need an ingress IP/hostname
+func (*BlueGreenDeploymentReconciler) checkLoadBalancerServiceTypeStatus(service corev1.Service) bool {
+	for _, ingress := range service.Status.LoadBalancer.Ingress {
+		if ingress.IP != "" || ingress.Hostname != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// For ClusterIP, having an IP is enough
+func (*BlueGreenDeploymentReconciler) checkClusterIpServiceTypeStatus(service corev1.Service) bool {
+	return service.Spec.ClusterIP != ""
+}
+
+// For NodePort, having cluster IP and assigned node ports
+func (*BlueGreenDeploymentReconciler) checkNodePortServiceTypeStatus(service corev1.Service) bool {
+	return service.Spec.ClusterIP != "" && len(service.Spec.Ports) > 0 && service.Spec.Ports[0].NodePort != 0
+}
+
+// For ExternalName, just need the external name set
+func (*BlueGreenDeploymentReconciler) checkExternalNameServiceTypeStatus(service corev1.Service) bool {
+	return service.Spec.ExternalName != ""
+}
+
+func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.Deployment {
+	d := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: bgd.Name + "-", // K8s will append a random suffix
+			Namespace:    bgd.Namespace,
+			Labels: map[string]string{
+				"app":    bgd.Name,
+				"color":  color,
+				"active": strconv.FormatBool(active),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(bgd, bgd.GroupVersionKind()),
+			},
+		},
+		Spec: *bgd.Spec.Deployment.DeploymentSpec.DeepCopy(),
+	}
+	return d
+}
+
+func (r *BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) corev1.Service {
+	svcSpec := bgd.Spec.Service.ServiceSpec
+	namePrefix := "active-"
+	if !active {
+		namePrefix = "blue-"
+	}
+	s := corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      namePrefix + bgd.Name,
+			Namespace: bgd.Namespace,
+			Labels: map[string]string{
+				"app":   bgd.Name,
+				"color": color,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(bgd, bgd.GroupVersionKind()),
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app":    bgd.Name,
+				"active": strconv.FormatBool(active),
+				"color":  color,
+			},
+			Type:            svcSpec.Type,
+			Ports:           svcSpec.Ports,
+			SessionAffinity: svcSpec.SessionAffinity,
+		},
+	}
+	return s
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -74,7 +349,8 @@ func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 				// Only enqueue reconcile if status has changed
 				if newObj.Status.Phase != oldObj.Status.Phase {
 					switch newObj.Status.Phase {
-					case learningv1alpha1.PhasePending,
+					case "",
+						learningv1alpha1.PhasePending,
 						learningv1alpha1.PhaseDeploying,
 						learningv1alpha1.PhasePromoting:
 						return true
