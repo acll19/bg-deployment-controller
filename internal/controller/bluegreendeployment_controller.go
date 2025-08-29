@@ -51,10 +51,6 @@ type BlueGreenDeploymentReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the BlueGreenDeployment object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
@@ -88,31 +84,16 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	if deploys.Size() == 1 {
 		deploy := deploys.Items[0]
-		if !equality.Semantic.DeepEqual(&deploy.Spec, &bgd.Spec.Deployment.DeploymentSpec) {
-			log.Info("Deployment spec has changed, updating deployment")
-			deploy.Spec = *bgd.Spec.Deployment.DeploymentSpec.DeepCopy()
-			err = r.Update(ctx, &deploy)
-			if err != nil {
-				log.Error(err, "unable to update deployment")
-				return ctrl.Result{}, err
-			}
-			log.Info("Deployment updated successfully")
+		if result, err := r.reconcileDeploymentForBGD(ctx, &deploy, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
+			return result, err
 		}
 	} else if deploys.Size() > 1 {
 		// This means that we have marked an active deployment for cleanup but it hasn't been deleted yet.
 		// So we reconcile the new deployment only (does not have the cleanup label).
 		for _, d := range deploys.Items {
 			if d.Labels["cleanup"] != "true" {
-				deploy := deploys.Items[0]
-				if !equality.Semantic.DeepEqual(&deploy.Spec, &bgd.Spec.Deployment.DeploymentSpec) {
-					log.Info("Deployment spec has changed, updating deployment")
-					deploy.Spec = *bgd.Spec.Deployment.DeploymentSpec.DeepCopy()
-					err = r.Update(ctx, &deploy)
-					if err != nil {
-						log.Error(err, "unable to update deployment")
-						return ctrl.Result{}, err
-					}
-					log.Info("Deployment updated successfully")
+				if result, err := r.reconcileDeploymentForBGD(ctx, &d, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
+					return result, err
 				}
 				break
 			}
@@ -197,7 +178,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		// if promotion has gone will, change phase to cleanup
 		// check if there is an active deployment already
 		active := true
-		activeDeploys, err := r.fetchDeployments(ctx, bgd, active)
+		activeDeploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
 		if err != nil {
 			log.Error(err, "unable to fetch active deployment for BGD")
 			return ctrl.Result{}, err
@@ -235,7 +216,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		deployToPromote.Labels["color"] = "green"
 
 		// Execute all updates in a transaction-like manner
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
 			if activeD != nil {
 				if err := r.Update(ctx, activeD); err != nil {
 					return err
@@ -248,49 +229,34 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			}
 			return nil
 		}); err != nil {
-			log.Error(err, "failed to update deployments during promotion")
-			return ctrl.Result{}, err
+			return result, err
 		}
 
 		bgd.Status.Phase = learningv1alpha1.PhaseCleaningUp
 		// TODO: update conditions
 	}
 
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		err = r.Get(ctx, req.NamespacedName, &bgd)
-		if err != nil {
-			log.Error(err, "unable to fetch BGD for status update")
+	result, err := r.retryUpdateOnConflict(ctx, "update BGD status", func() error {
+		if err := r.Get(ctx, req.NamespacedName, &bgd); err != nil {
 			return err
 		}
-
-		err = r.Status().Update(ctx, &bgd)
-		if err != nil {
-			return err
-		}
-
-		return nil
+		return r.Status().Update(ctx, &bgd)
 	})
-
 	if err != nil {
-		log.Error(err, "unable to update BGD status after retries")
-		return ctrl.Result{}, err
+		return result, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) fetchDeployments(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
-	activeDeploys := appsv1.DeploymentList{}
-	activeDeploysSelector := client.MatchingLabels{"app": bgd.Name, "active": strconv.FormatBool(active)}
-	err := r.List(ctx, &activeDeploys, activeDeploysSelector)
-	return activeDeploys, err
-}
-
 func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
 	deploys := appsv1.DeploymentList{}
-	labelSelector := client.MatchingLabels{"app": bgd.Name, "active": strconv.FormatBool(active)}
-	err := r.List(ctx, &deploys, labelSelector)
-	if err != nil {
+	name := bgd.Name
+	labelSelector := client.MatchingLabels{
+		"app":    name,
+		"active": strconv.FormatBool(active),
+	}
+	if err := r.List(ctx, &deploys, labelSelector); err != nil {
 		return deploys, err
 	}
 	return deploys, nil
@@ -380,6 +346,30 @@ func (r *BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.Blue
 		},
 	}
 	return s
+}
+
+func (r *BlueGreenDeploymentReconciler) reconcileDeploymentForBGD(ctx context.Context, deploy *appsv1.Deployment, desiredSpec *appsv1.DeploymentSpec) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if !equality.Semantic.DeepEqual(&deploy.Spec, desiredSpec) {
+		log.Info("Deployment spec has changed, updating deployment")
+		deploy.Spec = *desiredSpec.DeepCopy()
+		if err := r.Update(ctx, deploy); err != nil {
+			log.Error(err, "unable to update deployment")
+			return ctrl.Result{}, err
+		}
+		log.Info("Deployment updated successfully")
+	}
+	return ctrl.Result{}, nil
+}
+
+// retryUpdateOnConflict executes the provided update function with retries on conflict
+func (r *BlueGreenDeploymentReconciler) retryUpdateOnConflict(ctx context.Context, failureMsg string, updateFn func() error) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, updateFn); err != nil {
+		log.Error(err, "failed to "+failureMsg)
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
