@@ -18,4 +18,9 @@ resources:
   kind: BlueGreenDeployment
   path: aca.com/bg-deployment-controller/api/v1alpha1
   version: v1alpha1
+- controller: true
+  domain: aca.com
+  group: learning
+  kind: BlueGreenDeploymentTester
+  version: v1alpha1
 version: "3"

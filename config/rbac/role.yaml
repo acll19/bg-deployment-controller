@@ -32,6 +32,7 @@ rules:
   - learning.aca.com
   resources:
   - bluegreendeployments
+  - bluegreendeploymenttesters
   verbs:
   - create
   - delete
@@ -44,12 +45,14 @@ rules:
   - learning.aca.com
   resources:
   - bluegreendeployments/finalizers
+  - bluegreendeploymenttesters/finalizers
   verbs:
   - update
 - apiGroups:
   - learning.aca.com
   resources:
   - bluegreendeployments/status
+  - bluegreendeploymenttesters/status
   verbs:
   - get
   - patch
