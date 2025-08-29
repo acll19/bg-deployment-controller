@@ -22,7 +22,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,12 +84,12 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if deploys.Size() == 1 {
+	if len(deploys.Items) == 1 {
 		deploy := deploys.Items[0]
 		if result, err := r.reconcileDeploymentForBGD(ctx, &deploy, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
 			return result, err
 		}
-	} else if deploys.Size() > 1 {
+	} else if len(deploys.Items) > 1 {
 		// This means that we have marked an active deployment for cleanup but it hasn't been deleted yet.
 		// So we reconcile the new deployment only (does not have the cleanup label).
 		for _, d := range deploys.Items {
@@ -180,10 +179,10 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		var activeD *appsv1.Deployment
+		var activeDeploy *appsv1.Deployment
 		if activeDeploys.Size() > 0 {
-			activeD = &activeDeploys.Items[0]
-			activeD.Labels["cleanup"] = "true" // mark for cleanup
+			activeDeploy = &activeDeploys.Items[0]
+			activeDeploy.Labels["cleanup"] = "true" // mark for cleanup
 		}
 
 		active = false
@@ -203,11 +202,17 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		deployToPromote.Labels["active"] = "true"
 		deployToPromote.Labels["color"] = "green"
+		deployToPromote.Spec.Template.ObjectMeta.Labels["active"] = "true"
+		deployToPromote.Spec.Template.ObjectMeta.Labels["color"] = "green"
+		deployToPromote.Spec.Selector.MatchLabels["active"] = "true"
+		deployToPromote.Spec.Selector.MatchLabels["color"] = "green"
 
-		// Execute all updates in a transaction-like manner
+		// TODO: Update active service selector to point to the new deployment
+		// create service if it doesn't exist (could happen after the first rollout)
+
 		if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
-			if activeD != nil {
-				if err := r.Update(ctx, activeD); err != nil {
+			if activeDeploy != nil {
+				if err := r.Update(ctx, activeDeploy); err != nil {
 					return err
 				}
 			}
@@ -232,12 +237,16 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	result, err := r.retryUpdateOnConflict(ctx, "update BGD status", func() error {
+		status := bgd.Status.DeepCopy()
 		if err := r.Get(ctx, req.NamespacedName, &bgd); err != nil {
 			return err
 		}
+		bgd.Status = *status
 		return r.Status().Update(ctx, &bgd)
 	})
+
 	if err != nil {
+		// TODO: handle status error
 		return result, err
 	}
 
@@ -246,9 +255,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
 	deploys := appsv1.DeploymentList{}
-	name := bgd.Name
 	labelSelector := client.MatchingLabels{
-		"app":    name,
 		"active": strconv.FormatBool(active),
 	}
 	if err := r.List(ctx, &deploys, labelSelector); err != nil {
@@ -259,7 +266,7 @@ func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Contex
 
 func (r *BlueGreenDeploymentReconciler) listServicesForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, color string) (corev1.ServiceList, error) {
 	services := corev1.ServiceList{}
-	labelSelector := client.MatchingLabels{"app": bgd.Name, "color": color}
+	labelSelector := client.MatchingLabels{"color": color}
 	err := r.List(ctx, &services, labelSelector)
 	if err != nil {
 		return services, err
@@ -293,12 +300,27 @@ func (*BlueGreenDeploymentReconciler) checkExternalNameServiceTypeStatus(service
 }
 
 func (*BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.Deployment {
+	spec := *bgd.Spec.Deployment.DeepCopy()
+	selector := spec.Selector
+	if selector.MatchLabels == nil {
+		selector.MatchLabels = make(map[string]string)
+	}
+	selector.MatchLabels["active"] = strconv.FormatBool(active)
+	selector.MatchLabels["color"] = color
+	spec.Selector = selector
+
+	templateLabels := spec.Template.ObjectMeta.Labels
+	templateLabels["active"] = strconv.FormatBool(active)
+	templateLabels["color"] = color
+	spec.Template.ObjectMeta.Labels = templateLabels
+
+	bgd.Spec.Deployment = spec
+
 	d := appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: bgd.Name + "-", // K8s will append a random suffix
 			Namespace:    bgd.Namespace,
 			Labels: map[string]string{
-				"app":    bgd.Name,
 				"color":  color,
 				"active": strconv.FormatBool(active),
 			},
@@ -312,17 +334,24 @@ func (*BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.Blu
 }
 
 func (*BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) corev1.Service {
-	svcSpec := bgd.Spec.Service.ServiceSpec
+	svcSpec := bgd.Spec.Service
 	namePrefix := "active-"
 	if !active {
 		namePrefix = "blue-"
 	}
+
+	selector := bgd.Spec.Service.Selector
+	if selector == nil {
+		selector = make(map[string]string)
+	}
+	selector["active"] = strconv.FormatBool(active)
+	selector["color"] = color
+
 	s := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namePrefix + bgd.Name,
 			Namespace: bgd.Namespace,
 			Labels: map[string]string{
-				"app":   bgd.Name,
 				"color": color,
 			},
 			OwnerReferences: []metav1.OwnerReference{
@@ -330,14 +359,9 @@ func (*BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGr
 			},
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app":    bgd.Name,
-				"active": strconv.FormatBool(active),
-				"color":  color,
-			},
-			Type:            svcSpec.Type,
-			Ports:           svcSpec.Ports,
-			SessionAffinity: svcSpec.SessionAffinity,
+			Selector: selector,
+			Type:     svcSpec.Type,
+			Ports:    svcSpec.Ports,
 		},
 	}
 	return s
@@ -345,9 +369,19 @@ func (*BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGr
 
 func (r *BlueGreenDeploymentReconciler) reconcileDeploymentForBGD(ctx context.Context, deploy *appsv1.Deployment, desiredSpec *appsv1.DeploymentSpec) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	if !equality.Semantic.DeepEqual(&deploy.Spec, desiredSpec) {
+	if deploy.Spec.Selector.MatchLabels["color"] == "" ||
+		deploy.Spec.Selector.MatchLabels["active"] == "" ||
+		deploy.ObjectMeta.Labels["color"] == "" ||
+		deploy.ObjectMeta.Labels["active"] == "" {
+
 		log.Info("Deployment spec has changed, updating deployment")
-		deploy.Spec = *desiredSpec.DeepCopy()
+
+		deploy.Spec.Selector.MatchLabels["color"] = desiredSpec.Selector.MatchLabels["color"]
+		deploy.Spec.Selector.MatchLabels["active"] = desiredSpec.Selector.MatchLabels["active"]
+
+		deploy.ObjectMeta.Labels["color"] = deploy.Spec.Template.Labels["color"]
+		deploy.ObjectMeta.Labels["active"] = deploy.Spec.Template.Labels["active"]
+
 		if err := r.Update(ctx, deploy); err != nil {
 			log.Error(err, "unable to update deployment")
 			return ctrl.Result{}, err
@@ -392,20 +426,25 @@ func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&corev1.Service{}).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				newObj := e.ObjectNew.(*learningv1alpha1.BlueGreenDeployment)
-				oldObj := e.ObjectOld.(*learningv1alpha1.BlueGreenDeployment)
-				// Only enqueue reconcile if status has changed
-				if newObj.Status.Phase != oldObj.Status.Phase {
-					switch newObj.Status.Phase {
-					case "",
-						learningv1alpha1.PhasePending,
-						learningv1alpha1.PhaseDeploying,
-						learningv1alpha1.PhasePromoting,
-						learningv1alpha1.PhaseSucceeded,
-						learningv1alpha1.PhaseFailed:
-						return true
-					default:
-						return false
+				switch e.ObjectNew.(type) {
+				case *appsv1.Deployment, *corev1.Service:
+					return true
+				default:
+					newBGDObj := e.ObjectNew.(*learningv1alpha1.BlueGreenDeployment)
+					oldBGDObj := e.ObjectOld.(*learningv1alpha1.BlueGreenDeployment)
+					// Only enqueue reconcile if status has changed
+					if newBGDObj.Status.Phase != oldBGDObj.Status.Phase {
+						switch newBGDObj.Status.Phase {
+						case "",
+							learningv1alpha1.PhasePending,
+							learningv1alpha1.PhaseDeploying,
+							learningv1alpha1.PhasePromoting,
+							learningv1alpha1.PhaseSucceeded,
+							learningv1alpha1.PhaseFailed:
+							return true
+						default:
+							return false
+						}
 					}
 				}
 
