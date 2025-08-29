@@ -8649,13 +8649,6 @@ spec:
                 items:
                   properties:
                     http:
-                      default:
-                        http:
-                          expectedStatusCodes: '[200]'
-                          initialDelaySeconds: 5
-                          path: /
-                          port: 80
-                          timeoutSeconds: 5
                       properties:
                         expectedStatusCodes:
                           default:

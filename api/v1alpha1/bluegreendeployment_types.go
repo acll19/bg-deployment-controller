@@ -55,7 +55,6 @@ type TestSpec struct {
 	Name string `json:"name"`
 
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default={http: {path: "/", port: 80, expectedStatusCodes: [200], timeoutSeconds: 5, initialDelaySeconds: 5}}
 	Http HttpTestSpec `json:"http,omitempty"`
 }
 
