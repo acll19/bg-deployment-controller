@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
@@ -123,7 +124,13 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 		bgd.Status.Phase = learningv1alpha1.PhaseDeploying
-		// TODO: update conditions
+		r.addStatusCondition(
+			&bgd,
+			learningv1alpha1.ConditionDeploying,
+			metav1.ConditionTrue,
+			learningv1alpha1.ReasonDeploymentCreated,
+			"Deployment and Service created, waiting for pods to be ready",
+		)
 	case learningv1alpha1.PhaseDeploying:
 		active := false
 		deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
@@ -132,18 +139,10 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		if len(deploys.Items) == 0 {
-			// TODO: recreate the deployment. This should not happen.
-			log.Error(err, "no deployments found for BGD")
-			return ctrl.Result{}, nil
-		}
-
 		services, err := r.listServicesForBGD(ctx, &bgd, "blue")
-
-		if len(services.Items) == 0 {
-			// TODO: recreate the service. This should not happen.
-			log.Error(err, "no services found for BGD")
-			return ctrl.Result{}, nil
+		if err != nil {
+			log.Error(err, "unable to fetch blue service for BGD")
+			return ctrl.Result{}, err
 		}
 
 		deploy := deploys.Items[0]
@@ -164,8 +163,14 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		// Check if we trigger promotion
 		if serviceReady && deploy.Status.ReadyReplicas == *deploy.Spec.Replicas {
 			bgd.Status.Phase = learningv1alpha1.PhaseRunTests
+			r.addStatusCondition(
+				&bgd,
+				learningv1alpha1.ConditionRunTests,
+				metav1.ConditionTrue,
+				learningv1alpha1.ReasonDeploymentCreated,
+				"Deployment and Service are ready, proceed with tests",
+			)
 		}
-		// TODO: update conditions
 
 	case learningv1alpha1.PhasePromoting: // after tests are done
 		active := true
@@ -196,13 +201,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			}
 		}
 
-		if deployToPromote == nil {
-			// TODO: recreate the deployment. This should not happen.
-			err := errors.NewNotFound(appsv1.Resource("deployments"), "no matching deployment found to promote")
-			log.Error(err, "unable to find deployment to promote for BGD")
-			return ctrl.Result{}, err
-		}
-
 		deployToPromote.Labels["active"] = "true"
 		deployToPromote.Labels["color"] = "green"
 
@@ -224,7 +222,13 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 		bgd.Status.Phase = learningv1alpha1.PhaseCleaningUp
-		// TODO: update conditions
+		r.addStatusCondition(
+			&bgd,
+			learningv1alpha1.ConditionPromoting,
+			metav1.ConditionTrue,
+			learningv1alpha1.ReasonServiceUpdated,
+			"Service updated to point to new deployment, cleaning up old resources",
+		)
 	}
 
 	result, err := r.retryUpdateOnConflict(ctx, "update BGD status", func() error {
@@ -365,6 +369,19 @@ func (*BlueGreenDeploymentReconciler) retryUpdateOnConflict(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (*BlueGreenDeploymentReconciler) addStatusCondition(bgd *learningv1alpha1.BlueGreenDeployment, conditionType learningv1alpha1.BlueGreenConditionType, status metav1.ConditionStatus, reason learningv1alpha1.BlueGreenConditionReason, message string) {
+	now := metav1.Now()
+	condition := metav1.Condition{
+		Type:               string(conditionType),
+		Status:             status,
+		LastTransitionTime: now,
+		Reason:             string(reason),
+		Message:            message,
+	}
+
+	meta.SetStatusCondition(&bgd.Status.Conditions, condition)
 }
 
 // SetupWithManager sets up the controller with the Manager.

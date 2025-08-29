@@ -79,6 +79,33 @@ const (
 	PhaseFailed BlueGreenPhase = "Failed"
 )
 
+type BlueGreenConditionType string
+
+const (
+	ConditionReady      BlueGreenConditionType = "Ready"
+	ConditionDeploying  BlueGreenConditionType = "Deploying"
+	ConditionRunTests   BlueGreenConditionType = "RunTests"
+	ConditionPromoting  BlueGreenConditionType = "Promoting"
+	ConditionCleaningUp BlueGreenConditionType = "CleaningUp"
+	ConditionSucceeded  BlueGreenConditionType = "Succeeded"
+	ConditionFailed     BlueGreenConditionType = "Failed"
+)
+
+type BlueGreenConditionReason string
+
+const (
+	ReasonDeploymentError     BlueGreenConditionReason = "Error"
+	ReasonDeploymentCreated   BlueGreenConditionReason = "DeploymentCreated"
+	ReasonDeploymentUpdated   BlueGreenConditionReason = "DeploymentUpdated"
+	ReasonServiceCreated      BlueGreenConditionReason = "ServiceCreated"
+	ReasonServiceUpdated      BlueGreenConditionReason = "ServiceUpdated"
+	ReasonDeploymentReady     BlueGreenConditionReason = "DeploymentReady"
+	ReasonTestsPassed         BlueGreenConditionReason = "TestsPassed"
+	ReasonTestsFailed         BlueGreenConditionReason = "TestsFailed"
+	ReasonServicePromoted     BlueGreenConditionReason = "ServicePromoted"
+	ReasonOldResourcesDeleted BlueGreenConditionReason = "OldResourcesDeleted"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
