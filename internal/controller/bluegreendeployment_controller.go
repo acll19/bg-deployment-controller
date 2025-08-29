@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,7 +71,52 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if err != nil {
+		log.Error(err, "unable to fetch BlueGreenDeployment")
 		return ctrl.Result{}, err
+	}
+
+	active := false
+	if bgd.Status.Phase == learningv1alpha1.PhaseSucceeded {
+		active = true
+	}
+
+	deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
+	if err != nil {
+		log.Error(err, "unable to list deployments for BGD")
+		return ctrl.Result{}, err
+	}
+
+	if deploys.Size() == 1 {
+		deploy := deploys.Items[0]
+		if !equality.Semantic.DeepEqual(&deploy.Spec, &bgd.Spec.Deployment.DeploymentSpec) {
+			log.Info("Deployment spec has changed, updating deployment")
+			deploy.Spec = *bgd.Spec.Deployment.DeploymentSpec.DeepCopy()
+			err = r.Update(ctx, &deploy)
+			if err != nil {
+				log.Error(err, "unable to update deployment")
+				return ctrl.Result{}, err
+			}
+			log.Info("Deployment updated successfully")
+		}
+	} else if deploys.Size() > 1 {
+		// This means that we have marked an active deployment for cleanup but it hasn't been deleted yet.
+		// So we reconcile the new deployment only (does not have the cleanup label).
+		for _, d := range deploys.Items {
+			if d.Labels["cleanup"] != "true" {
+				deploy := deploys.Items[0]
+				if !equality.Semantic.DeepEqual(&deploy.Spec, &bgd.Spec.Deployment.DeploymentSpec) {
+					log.Info("Deployment spec has changed, updating deployment")
+					deploy.Spec = *bgd.Spec.Deployment.DeploymentSpec.DeepCopy()
+					err = r.Update(ctx, &deploy)
+					if err != nil {
+						log.Error(err, "unable to update deployment")
+						return ctrl.Result{}, err
+					}
+					log.Info("Deployment updated successfully")
+				}
+				break
+			}
+		}
 	}
 
 	switch bgd.Status.Phase {
