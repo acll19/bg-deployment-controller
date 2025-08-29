@@ -73,7 +73,9 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	active := false
 	if bgd.Status.Phase == learningv1alpha1.PhaseSucceeded {
+		// This means we have a stable system and a new rollout is starting
 		active = true
+		bgd.Status.Phase = learningv1alpha1.PhasePending
 	}
 
 	deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
@@ -91,7 +93,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		// This means that we have marked an active deployment for cleanup but it hasn't been deleted yet.
 		// So we reconcile the new deployment only (does not have the cleanup label).
 		for _, d := range deploys.Items {
-			if d.Labels["cleanup"] != "true" {
+			if !r.isCleanUpScheduledForDeployment(&d) {
 				if result, err := r.reconcileDeploymentForBGD(ctx, &d, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
 					return result, err
 				}
@@ -103,9 +105,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	switch bgd.Status.Phase {
 	case "",
 		learningv1alpha1.PhasePending:
-		// create active deploy and svc
-		// set phase to Pending
-		// return
 		log.Info("creating deployment")
 		active := false
 		color := "blue"
@@ -126,9 +125,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		bgd.Status.Phase = learningv1alpha1.PhaseDeploying
 		// TODO: update conditions
 	case learningv1alpha1.PhaseDeploying:
-		// check status of the deploy and svc
-		// if ready, change phase to Deploying
-		// return
 		active := false
 		deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
 		if err != nil {
@@ -172,11 +168,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		// TODO: update conditions
 
 	case learningv1alpha1.PhasePromoting: // after tests are done
-		// update live svc selector to point to new deploy
-		// update new deploy label to active (or live?)
-		// update former active deploy label to inactive
-		// if promotion has gone will, change phase to cleanup
-		// check if there is an active deployment already
 		active := true
 		activeDeploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
 		if err != nil {
@@ -199,7 +190,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		var deployToPromote *appsv1.Deployment
 		for _, d := range inactiveDeploys.Items {
-			if d.Labels["cleanup"] != "true" {
+			if !r.isCleanUpScheduledForDeployment(&d) {
 				deployToPromote = &d
 				break
 			}
@@ -297,7 +288,7 @@ func (*BlueGreenDeploymentReconciler) checkExternalNameServiceTypeStatus(service
 	return service.Spec.ExternalName != ""
 }
 
-func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.Deployment {
+func (*BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.Deployment {
 	d := appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: bgd.Name + "-", // K8s will append a random suffix
@@ -316,7 +307,7 @@ func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.B
 	return d
 }
 
-func (r *BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) corev1.Service {
+func (*BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) corev1.Service {
 	svcSpec := bgd.Spec.Service.ServiceSpec
 	namePrefix := "active-"
 	if !active {
@@ -362,8 +353,12 @@ func (r *BlueGreenDeploymentReconciler) reconcileDeploymentForBGD(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
+func (*BlueGreenDeploymentReconciler) isCleanUpScheduledForDeployment(deployment *appsv1.Deployment) bool {
+	return deployment.Labels["cleanup"] == "true"
+}
+
 // retryUpdateOnConflict executes the provided update function with retries on conflict
-func (r *BlueGreenDeploymentReconciler) retryUpdateOnConflict(ctx context.Context, failureMsg string, updateFn func() error) (ctrl.Result, error) {
+func (*BlueGreenDeploymentReconciler) retryUpdateOnConflict(ctx context.Context, failureMsg string, updateFn func() error) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, updateFn); err != nil {
 		log.Error(err, "failed to "+failureMsg)
