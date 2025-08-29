@@ -37,6 +37,9 @@ type BlueGreenDeploymentSpec struct {
 
 	// +kubebuilder:validation:Required
 	Service ServiceSpec `json:"service"`
+
+	// +kubebuilder:validation:Optional
+	Tests []TestSpec `json:"tests,omitempty"`
 }
 
 type DeploymentSpec struct {
@@ -45,6 +48,37 @@ type DeploymentSpec struct {
 
 type ServiceSpec struct {
 	corev1.ServiceSpec `json:",inline"`
+}
+
+type TestSpec struct {
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={http: {path: "/", port: 80, expectedStatusCodes: [200], timeoutSeconds: 5, initialDelaySeconds: 5}}
+	Http HttpTestSpec `json:"http,omitempty"`
+}
+
+type HttpTestSpec struct {
+	// +kubebuilder:validation:Required
+	Path string `json:"path"`
+	// +kubebuilder:validation:Required
+	Port int32 `json:"port"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={200}
+	ExpectedStatusCodes []int32 `json:"expectedStatusCodes,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	HttpHeaders map[string]string `json:"httpHeaders,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=5
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=3
+	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
 }
 
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment.

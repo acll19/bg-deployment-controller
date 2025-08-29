@@ -8645,6 +8645,52 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
                     type: string
                 type: object
+              tests:
+                items:
+                  properties:
+                    http:
+                      default:
+                        http:
+                          expectedStatusCodes: '[200]'
+                          initialDelaySeconds: 5
+                          path: /
+                          port: 80
+                          timeoutSeconds: 5
+                      properties:
+                        expectedStatusCodes:
+                          default:
+                          - 200
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                        httpHeaders:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        initialDelaySeconds:
+                          default: 3
+                          format: int32
+                          type: integer
+                        path:
+                          type: string
+                        port:
+                          format: int32
+                          type: integer
+                        timeoutSeconds:
+                          default: 5
+                          format: int32
+                          type: integer
+                      required:
+                      - path
+                      - port
+                      type: object
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
             required:
             - deployment
             - service
