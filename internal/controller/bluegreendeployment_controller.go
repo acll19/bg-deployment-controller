@@ -352,7 +352,9 @@ func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error
 					case "",
 						learningv1alpha1.PhasePending,
 						learningv1alpha1.PhaseDeploying,
-						learningv1alpha1.PhasePromoting:
+						learningv1alpha1.PhasePromoting,
+						learningv1alpha1.PhaseSucceeded,
+						learningv1alpha1.PhaseFailed:
 						return true
 					default:
 						return false
