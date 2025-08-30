@@ -4,7 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: bg-deployment-controller
     app.kubernetes.io/managed-by: kustomize
-  name: bluegreendeployment-sample
+  name: app
   namespace: default
 spec:
   deployment:

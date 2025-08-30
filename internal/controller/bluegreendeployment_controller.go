@@ -72,38 +72,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	active := false
-	if bgd.Status.Phase == learningv1alpha1.PhaseSucceeded {
-		// This means we have a stable system and a new rollout is starting
-		active = true
-		bgd.Status.Phase = learningv1alpha1.PhasePending
-	}
-
-	deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
-	if err != nil {
-		log.Error(err, "unable to list deployments for BGD")
-		return ctrl.Result{}, err
-	}
-
-	if len(deploys.Items) == 1 {
-		deploy := deploys.Items[0]
-		if result, err := r.reconcileDeploymentForBGD(ctx, &deploy, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
-			return result, err
-		}
-	} else if len(deploys.Items) > 1 {
-		// This means that we have marked an active deployment for cleanup but it hasn't been deleted yet.
-		// So we reconcile the new deployment only (does not have the cleanup label).
-		for _, d := range deploys.Items {
-			if !r.isCleanUpScheduledForDeployment(&d) {
-				if result, err := r.reconcileDeploymentForBGD(ctx, &d, &bgd.Spec.Deployment.DeploymentSpec); err != nil {
-					return result, err
-				}
-				break
-			}
-		}
-	}
-
-	blueSvc, err := r.listServicesForBGD(ctx, &bgd, "blue")
+	blueSvc, err := r.listServicesForBGD(ctx, "blue")
 	if err != nil {
 		log.Error(err, "unable to list blue services for BGD")
 		return ctrl.Result{}, err
@@ -141,7 +110,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	switch bgd.Status.Phase {
 	case "",
 		learningv1alpha1.PhasePending:
-		log.Info("creating deployment")
+		log.Info("creating preview deployment")
 		active := false
 		color := "blue"
 		d := r.deploymentForBGD(&bgd, color, active)
@@ -151,7 +120,28 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		log.Info("creating service")
+		active = true
+		color = "green"
+		deploys, err := r.listDeploymentsForBGD(ctx, active)
+		if err != nil {
+			log.Error(err, "unable to fetch active deployment for BGD")
+			return ctrl.Result{}, err
+		}
+		if len(deploys.Items) == 0 {
+			log.Info("creating active deployment")
+			d = r.deploymentForBGD(&bgd, color, active)
+			replicas := int32(0)
+			d.Spec.Replicas = &replicas
+			err = r.Create(ctx, &d)
+			if err != nil {
+				log.Error(err, "unable to create deployment")
+				return ctrl.Result{}, err
+			}
+		}
+
+		log.Info("creating blue service")
+		active = false
+		color = "blue"
 		s := r.serviceForBGD(&bgd, color, active)
 		err = r.Create(ctx, &s)
 		if err != nil {
@@ -168,13 +158,13 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		)
 	case learningv1alpha1.PhaseDeploying:
 		active := false
-		deploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
+		deploys, err := r.listDeploymentsForBGD(ctx, active)
 		if err != nil {
 			log.Error(err, "unable to fetch blue deployment for BGD")
 			return ctrl.Result{}, err
 		}
 
-		services, err := r.listServicesForBGD(ctx, &bgd, "blue")
+		services, err := r.listServicesForBGD(ctx, "blue")
 		if err != nil {
 			log.Error(err, "unable to fetch blue service for BGD")
 			return ctrl.Result{}, err
@@ -207,45 +197,9 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			)
 		}
 
-	case learningv1alpha1.PhasePromoting: // after tests are done
-		active := true
-		activeDeploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
-		if err != nil {
-			log.Error(err, "unable to fetch active deployment for BGD")
-			return ctrl.Result{}, err
-		}
-
-		var activeDeploy *appsv1.Deployment
-		if len(activeDeploys.Items) > 0 {
-			activeDeploy = &activeDeploys.Items[0]
-			activeDeploy.Labels["cleanup"] = "true" // mark for cleanup
-		}
-
-		active = false
-		inactiveDeploys, err := r.listDeploymentsForBGD(ctx, &bgd, active)
-		if err != nil {
-			log.Error(err, "unable to fetch blue deployment for BGD")
-			return ctrl.Result{}, err
-		}
-
-		var deployToPromote *appsv1.Deployment
-		for _, d := range inactiveDeploys.Items {
-			if !r.isCleanUpScheduledForDeployment(&d) {
-				deployToPromote = &d
-				break
-			}
-		}
-
-		deployToPromote.Labels["active"] = "true"
-		deployToPromote.Labels["color"] = "green"
-		deployToPromote.Spec.Template.ObjectMeta.Labels["active"] = "true"
-		deployToPromote.Spec.Template.ObjectMeta.Labels["color"] = "green"
-		deployToPromote.Spec.Selector.MatchLabels["active"] = "true"
-		deployToPromote.Spec.Selector.MatchLabels["color"] = "green"
-
-		// create service if it doesn't exist (could happen after the first rollout)
-		activeServices, err := r.listServicesForBGD(ctx, &bgd, "active")
-
+	case learningv1alpha1.PhasePromoting: // this phase is set by the tester controller when tests pass
+		// create active service if it doesn't exist (could happen during the first ever rollout)
+		activeServices, err := r.listServicesForBGD(ctx, "active")
 		if errors.IsNotFound(err) || len(activeServices.Items) == 0 {
 			log.Info("Active service does not exist, creating")
 			s := r.serviceForBGD(&bgd, "active", true)
@@ -259,16 +213,37 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
+		active := false
+		inactiveDeploys, err := r.listDeploymentsForBGD(ctx, active)
+		if err != nil {
+			log.Error(err, "unable to fetch blue deployment for BGD")
+			return ctrl.Result{}, err
+		}
+
+		preview := inactiveDeploys.Items[0]
+
+		active = true
+		activeDeploys, err := r.listDeploymentsForBGD(ctx, active)
+		if err != nil {
+			log.Error(err, "unable to fetch active deployment for BGD")
+			return ctrl.Result{}, err
+		}
+		activeDeploy := activeDeploys.Items[0]
+
+		// Here's the actual promotion, just swapping spec.template
+		activeDeploy.Spec.Template.Spec = preview.Spec.Template.Spec
+		activeDeploy.Spec.Replicas = bgd.Spec.Deployment.Replicas
+		// Then set preview replicas to 0
+		replicas := int32(0)
+		preview.Spec.Replicas = &replicas
+
 		if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
-			if activeDeploy != nil {
-				if err := r.Update(ctx, activeDeploy); err != nil {
-					return err
-				}
+			if err := r.Update(ctx, &activeDeploy); err != nil {
+				return err
 			}
-			if deployToPromote != nil {
-				if err := r.Update(ctx, deployToPromote); err != nil {
-					return err
-				}
+
+			if err := r.Update(ctx, &preview); err != nil {
+				return err
 			}
 			return nil
 		}); err != nil {
@@ -302,7 +277,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, active bool) (appsv1.DeploymentList, error) {
+func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, active bool) (appsv1.DeploymentList, error) {
 	deploys := appsv1.DeploymentList{}
 	labelSelector := client.MatchingLabels{
 		"active": strconv.FormatBool(active),
@@ -313,7 +288,7 @@ func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Contex
 	return deploys, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) listServicesForBGD(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment, color string) (corev1.ServiceList, error) {
+func (r *BlueGreenDeploymentReconciler) listServicesForBGD(ctx context.Context, color string) (corev1.ServiceList, error) {
 	services := corev1.ServiceList{}
 	labelSelector := client.MatchingLabels{"color": color}
 	err := r.List(ctx, &services, labelSelector)
@@ -367,7 +342,7 @@ func (*BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.Blu
 
 	d := appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: bgd.Name + "-", // K8s will append a random suffix
+			GenerateName: color + bgd.Name + "-", // K8s will append a random suffix
 			Namespace:    bgd.Namespace,
 			Labels: map[string]string{
 				"color":  color,
@@ -414,34 +389,6 @@ func (*BlueGreenDeploymentReconciler) serviceForBGD(bgd *learningv1alpha1.BlueGr
 		},
 	}
 	return s
-}
-
-func (r *BlueGreenDeploymentReconciler) reconcileDeploymentForBGD(ctx context.Context, deploy *appsv1.Deployment, desiredSpec *appsv1.DeploymentSpec) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-	if deploy.Spec.Selector.MatchLabels["color"] == "" ||
-		deploy.Spec.Selector.MatchLabels["active"] == "" ||
-		deploy.ObjectMeta.Labels["color"] == "" ||
-		deploy.ObjectMeta.Labels["active"] == "" {
-
-		log.Info("Deployment spec has changed, updating deployment")
-
-		deploy.Spec.Selector.MatchLabels["color"] = desiredSpec.Selector.MatchLabels["color"]
-		deploy.Spec.Selector.MatchLabels["active"] = desiredSpec.Selector.MatchLabels["active"]
-
-		deploy.ObjectMeta.Labels["color"] = deploy.Spec.Template.Labels["color"]
-		deploy.ObjectMeta.Labels["active"] = deploy.Spec.Template.Labels["active"]
-
-		if err := r.Update(ctx, deploy); err != nil {
-			log.Error(err, "unable to update deployment")
-			return ctrl.Result{}, err
-		}
-		log.Info("Deployment updated successfully")
-	}
-	return ctrl.Result{}, nil
-}
-
-func (*BlueGreenDeploymentReconciler) isCleanUpScheduledForDeployment(deployment *appsv1.Deployment) bool {
-	return deployment.Labels["cleanup"] == "true"
 }
 
 // retryUpdateOnConflict executes the provided update function with retries on conflict
