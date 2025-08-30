@@ -23,13 +23,16 @@ spec:
           ports:
           - containerPort: 80
   service:
+    type: ClusterIP
     selector:
       app: nginx
     ports:
       - protocol: TCP
         port: 80
-        targetPort: 9376
-  # tests:
-  #   - name: smoke
-  #     http:
+        targetPort: 80
+  tests:
+    - name: smoke
+      http:
+        path: /
+        port: 80
 

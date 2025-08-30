@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -102,6 +103,41 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
+	blueSvc, err := r.listServicesForBGD(ctx, &bgd, "blue")
+	if err != nil {
+		log.Error(err, "unable to list blue services for BGD")
+		return ctrl.Result{}, err
+	}
+
+	// Reconcile blue service
+	if len(blueSvc.Items) == 0 && bgd.Status.Phase != learningv1alpha1.PhasePending && bgd.Status.Phase != "" {
+		// Service does not exist, create it
+		log.Info("Blue service does not exist, creating")
+		s := r.serviceForBGD(&bgd, "blue", false)
+		err = r.Create(ctx, &s)
+		if err != nil {
+			log.Error(err, "unable to create blue service")
+			return ctrl.Result{}, err
+		}
+	} else if bgd.Status.Phase != learningv1alpha1.PhasePending && bgd.Status.Phase != "" {
+		svc := blueSvc.Items[0]
+		if equality.Semantic.DeepEqual(svc.Spec.Ports, bgd.Spec.Service.Ports) ||
+			equality.Semantic.DeepEqual(svc.Spec.Selector, bgd.Spec.Service.Selector) ||
+			svc.Spec.Type != bgd.Spec.Service.Type {
+			log.Info("Blue service type has changed, updating")
+			svc.Spec.Selector = bgd.Spec.Service.Selector
+			svc.Spec.Ports = bgd.Spec.Service.Ports
+			svc.Spec.Type = bgd.Spec.Service.Type
+			err = r.Update(ctx, &svc)
+			if err != nil {
+				log.Error(err, "unable to update blue service")
+				return ctrl.Result{}, err
+			}
+			log.Info("Blue service updated successfully")
+		}
+	}
+	// End reconcile blue service
+
 	switch bgd.Status.Phase {
 	case "",
 		learningv1alpha1.PhasePending:
@@ -180,7 +216,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 		var activeDeploy *appsv1.Deployment
-		if activeDeploys.Size() > 0 {
+		if len(activeDeploys.Items) > 0 {
 			activeDeploy = &activeDeploys.Items[0]
 			activeDeploy.Labels["cleanup"] = "true" // mark for cleanup
 		}
@@ -207,8 +243,21 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		deployToPromote.Spec.Selector.MatchLabels["active"] = "true"
 		deployToPromote.Spec.Selector.MatchLabels["color"] = "green"
 
-		// TODO: Update active service selector to point to the new deployment
 		// create service if it doesn't exist (could happen after the first rollout)
+		activeServices, err := r.listServicesForBGD(ctx, &bgd, "active")
+
+		if errors.IsNotFound(err) || len(activeServices.Items) == 0 {
+			log.Info("Active service does not exist, creating")
+			s := r.serviceForBGD(&bgd, "active", true)
+			err = r.Create(ctx, &s)
+			if err != nil {
+				log.Error(err, "unable to create active service")
+				return ctrl.Result{}, err
+			}
+		} else if err != nil {
+			log.Error(err, "unable to fetch active service for BGD")
+			return ctrl.Result{}, err
+		}
 
 		if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
 			if activeDeploy != nil {
