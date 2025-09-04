@@ -27,6 +27,7 @@ import (
 	learningv1alpha1 "aca.com/bg-deployment-controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -96,6 +97,13 @@ func (r *BlueGreenDeploymentTesterReconciler) Reconcile(ctx context.Context, req
 			err := r.Status().Update(ctx, &bgd)
 			if err != nil {
 				log.Error(err, "unable to update BlueGreenDeployment status")
+				addStatusCondition(
+					&bgd,
+					learningv1alpha1.ConditionRunTests,
+					metav1.ConditionFalse,
+					learningv1alpha1.ReasonTestsFailed,
+					err.Error(),
+				)
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, err
@@ -113,6 +121,18 @@ func (r *BlueGreenDeploymentTesterReconciler) Reconcile(ctx context.Context, req
 		}
 
 		log.Info("Test passed", "name", test.Name)
+		addStatusCondition(
+			&bgd,
+			learningv1alpha1.ConditionRunTests,
+			metav1.ConditionTrue,
+			learningv1alpha1.ReasonTestsPassed,
+			fmt.Sprintf("Test %s passed", test.Name),
+		)
+		err = r.Status().Update(ctx, &bgd)
+		if err != nil {
+			log.Error(err, "unable to update BlueGreenDeployment status")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// all tests passed

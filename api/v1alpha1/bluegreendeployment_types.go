@@ -137,6 +137,8 @@ const (
 	ReasonTestsFailed         BlueGreenConditionReason = "TestsFailed"
 	ReasonServicePromoted     BlueGreenConditionReason = "ServicePromoted"
 	ReasonOldResourcesDeleted BlueGreenConditionReason = "OldResourcesDeleted"
+	ReasonRolloutComplete     BlueGreenConditionReason = "RolloutComplete"
+	ReasonRolloutFailed       BlueGreenConditionReason = "RolloutFailed"
 )
 
 // +kubebuilder:object:root=true
