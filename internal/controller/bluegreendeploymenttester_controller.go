@@ -80,14 +80,14 @@ func (r *BlueGreenDeploymentTesterReconciler) Reconcile(ctx context.Context, req
 	}
 
 	for _, test := range tests {
-		// creationTime := bgd.ObjectMeta.CreationTimestamp.Time
-		// initialDelay := time.Duration(test.Http.InitialDelaySeconds) * time.Second
-		// now := time.Now()
+		creationTime := bgd.ObjectMeta.CreationTimestamp.Time
+		initialDelay := time.Duration(test.Http.InitialDelaySeconds) * time.Second
+		now := time.Now()
 
-		// if !creationTime.Add(initialDelay).After(now) {
-		// 	requeueAfter := creationTime.Add(initialDelay).Sub(now)
-		// 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
-		// }
+		if now.Before(creationTime.Add(initialDelay)) {
+			requeueAfter := creationTime.Add(initialDelay).Sub(now)
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
 
 		log.Info("Running test", "name", test.Name)
 		passed, err := r.runHTTPTest(&bgd, &test)
@@ -149,9 +149,9 @@ func (r *BlueGreenDeploymentTesterReconciler) Reconcile(ctx context.Context, req
 
 func (r *BlueGreenDeploymentTesterReconciler) runHTTPTest(bgd *learningv1alpha1.BlueGreenDeployment, test *learningv1alpha1.TestSpec) (bool, error) {
 	s := corev1.Service{}
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: bgd.Namespace, Name: "blue-" + bgd.Name}, &s)
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: bgd.Namespace, Name: "green-" + bgd.Name}, &s)
 	if err != nil {
-		return false, fmt.Errorf("error getting blue service: %w", err)
+		return false, fmt.Errorf("error getting green service: %w", err)
 	}
 
 	client := &http.Client{
@@ -159,7 +159,7 @@ func (r *BlueGreenDeploymentTesterReconciler) runHTTPTest(bgd *learningv1alpha1.
 	}
 
 	url := fmt.Sprintf("http://%s.%s.svc:%d%s",
-		"blue-"+bgd.Name,
+		"green-"+bgd.Name,
 		s.Namespace,
 		test.Http.Port,
 		test.Http.Path,

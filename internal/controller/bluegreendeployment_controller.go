@@ -101,6 +101,11 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		} else if deploy.Annotations["specHash"] != specHash {
 			log.Info("Deployment spec has changed, moving to Pending phase")
 			bgd.Status.Phase = learningv1alpha1.PhasePending
+			deploy.Annotations["specHash"] = specHash
+			if err = r.Update(ctx, &deploy); err != nil {
+				log.Error(err, "unable to update deployment with new specHash label")
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -132,6 +137,11 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		} else if svc.Annotations["specHash"] != specHash {
 			log.Info("Service spec has changed, moving to Pending phase")
 			bgd.Status.Phase = learningv1alpha1.PhasePending
+			svc.Annotations["specHash"] = specHash
+			if err = r.Update(ctx, &svc); err != nil {
+				log.Error(err, "unable to update service with new specHash label")
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -177,6 +187,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		deploy := deploys.Items[0]
 		deploy.Spec.Template = bgd.Spec.Deployment.Template
 		deploy.Labels = r.deploymentLabel(bgd.Spec.Deployment.Template.Labels, color, active)
+		deploy.Spec.Replicas = bgd.Spec.Deployment.Replicas
 		err = r.Update(ctx, &deploy)
 		if err != nil {
 			log.Error(err, "unable to update preview deployment")
@@ -299,6 +310,9 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 				break
 			}
 		}
+		progressingDeploy.Spec.Template = bgd.Spec.Deployment.Template
+		progressingDeploy.Spec.Replicas = bgd.Spec.Deployment.Replicas
+		progressingDeploy.Labels = r.deploymentLabel(bgd.Spec.Deployment.Template.Labels, "active", true)
 
 		var depromotingDeploy appsv1.Deployment
 		for _, d := range activeDeploys.Items {
@@ -332,8 +346,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		activeService := activeServices.Items[0]
 		activeService.Spec = bgd.Spec.Service.ServiceSpec
-
-		// TODO: check why it is creating two active deployments
 
 		if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
 			if err := r.Update(ctx, &progressingDeploy); err != nil {
