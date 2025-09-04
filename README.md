@@ -1,8 +1,13 @@
 # bg-deployment-controller
-// TODO(user): Add simple overview of use/purpose
+Blue/Green deployment strategy implemention with Kubernetes Deploymeents
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+This controller was created with learning purposes and it has not been used or tested in any system.
+A rough (an incomplete) implementation of Blue/Green deployment strategy in Kubernetes. This implementation uses Deployments, which is not a good approach because you lose many features from Deployments if they are there just to be swapped by a new rollout. 
+However, you will find in this controller
+
+* Use of predicates to filter reconciliation requests
+* Communication between controllers that manage the same CRs by means of status updates
 
 ## Getting Started
 
