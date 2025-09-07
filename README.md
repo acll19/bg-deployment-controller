@@ -3,7 +3,7 @@ Blue/Green deployment strategy implemention with Kubernetes Deploymeents
 
 ## Description
 This controller was created with learning purposes and it has not been used or tested in any system.
-A rough (an incomplete) implementation of Blue/Green deployment strategy in Kubernetes. This implementation uses Deployments, which is not a good approach because you lose many features from Deployments if they are there just to be swapped by a new rollout. 
+A rough (and incomplete) implementation of Blue/Green deployment strategy in Kubernetes. This implementation uses Deployments, which is not a good approach because you lose many features from Deployments if they are there just to be swapped by a new rollout. 
 However, you will find in this controller
 
 * Use of predicates to filter reconciliation requests
