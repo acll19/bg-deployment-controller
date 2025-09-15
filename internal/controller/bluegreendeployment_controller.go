@@ -163,7 +163,6 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 	case learningv1alpha1.PhasePromoting: // this phase is set by the tester controller when tests pass
-		// create active service if it doesn't exist (could happen during the first ever rollout)
 		result, err := r.handlePromotingPhase(ctx, &bgd)
 		if err != nil {
 			return result, err
@@ -187,6 +186,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	return ctrl.Result{}, nil
 }
 
+// handlePromotingPhase creates active service if it doesn't exist (could happen during the first ever rollout)
 func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	color := "active"
@@ -611,12 +611,12 @@ func (*BlueGreenDeploymentReconciler) retryUpdateOnConflict(ctx context.Context,
 func (r *BlueGreenDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&learningv1alpha1.BlueGreenDeployment{}).
-		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.ReplicaSet{}).
 		Owns(&corev1.Service{}).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				switch e.ObjectNew.(type) {
-				case *appsv1.Deployment, *corev1.Service:
+				case *appsv1.ReplicaSet, *corev1.Service:
 					return true
 				default:
 					newBGDObj := e.ObjectNew.(*learningv1alpha1.BlueGreenDeployment)
