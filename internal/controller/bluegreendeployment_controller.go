@@ -72,38 +72,38 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	blueDeploys := appsv1.DeploymentList{}
-	blueDeploys, err = r.listDeploymentsForBGD(ctx, false)
+	blueReplicaSets := appsv1.ReplicaSetList{}
+	blueReplicaSets, err = r.listReplicaSetsForBGD(ctx, false)
 	if err != nil {
 		log.Error(err, "unable to list green deployments for BGD")
 		return ctrl.Result{}, err
 	}
 
-	if len(blueDeploys.Items) > 0 {
-		deploy := blueDeploys.Items[0]
+	if len(blueReplicaSets.Items) > 0 {
+		rs := blueReplicaSets.Items[0]
 		specHash, err := hashObj(bgd.Spec.Deployment.DeploymentSpec.Template)
 		if err != nil {
-			log.Error(err, "unable to hash deployment spec")
+			log.Error(err, "unable to hash replicaset spec")
 			return ctrl.Result{}, err
 		}
 
-		if deploy.Annotations["specHash"] == "" {
-			log.Info("Adding specHash label to existing deployment")
-			if deploy.Annotations == nil {
-				deploy.Annotations = make(map[string]string)
+		if rs.Annotations["specHash"] == "" {
+			log.Info("Adding specHash label to existing replicaset")
+			if rs.Annotations == nil {
+				rs.Annotations = make(map[string]string)
 			}
-			deploy.Annotations["specHash"] = specHash
-			err = r.Update(ctx, &deploy)
+			rs.Annotations["specHash"] = specHash
+			err = r.Update(ctx, &rs)
 			if err != nil {
-				log.Error(err, "unable to update deployment with specHash label")
+				log.Error(err, "unable to update replicaset with specHash label")
 				return ctrl.Result{}, err
 			}
-		} else if deploy.Annotations["specHash"] != specHash {
+		} else if rs.Annotations["specHash"] != specHash {
 			log.Info("Deployment spec has changed, moving to Pending phase")
 			bgd.Status.Phase = learningv1alpha1.PhasePending
-			deploy.Annotations["specHash"] = specHash
-			if err = r.Update(ctx, &deploy); err != nil {
-				log.Error(err, "unable to update deployment with new specHash label")
+			rs.Annotations["specHash"] = specHash
+			if err = r.Update(ctx, &rs); err != nil {
+				log.Error(err, "unable to update replicaset with new specHash label")
 				return ctrl.Result{}, err
 			}
 		}
@@ -147,24 +147,24 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	switch bgd.Status.Phase {
 	case "":
-		result, err := r.handleEmptyPhase(ctx, bgd)
+		result, err := r.handleEmptyPhase(ctx, &bgd)
 		if err != nil {
 			return result, err
 		}
 	case learningv1alpha1.PhasePending:
-		result, err := r.handlePendingPhase(ctx, bgd)
+		result, err := r.handlePendingPhase(ctx, &bgd)
 		if err != nil {
 			return result, err
 		}
 	case learningv1alpha1.PhaseDeploying:
-		result, err := r.handleDeployingPhase(ctx, bgd)
+		result, err := r.handleDeployingPhase(ctx, &bgd)
 		if err != nil {
 			return result, err
 		}
 
 	case learningv1alpha1.PhasePromoting: // this phase is set by the tester controller when tests pass
 		// create active service if it doesn't exist (could happen during the first ever rollout)
-		result, err := r.handlePromotingPhase(ctx, bgd)
+		result, err := r.handlePromotingPhase(ctx, &bgd)
 		if err != nil {
 			return result, err
 		}
@@ -187,13 +187,13 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
+func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	color := "active"
 	activeServices, err := r.listServicesForBGD(ctx, color)
 	if apierrors.IsNotFound(err) || len(activeServices.Items) == 0 {
 		log.Info("Active service does not exist, creating")
-		s := r.serviceForBGD(&bgd, "active", true)
+		s := r.serviceForBGD(bgd, "active", true)
 		err = r.Create(ctx, &s)
 		if err != nil {
 			log.Error(err, "unable to create active service")
@@ -205,58 +205,58 @@ func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context
 	}
 
 	active := true
-	activeDeploys, err := r.listDeploymentsForBGD(ctx, active)
+	activeReplicaSets, err := r.listReplicaSetsForBGD(ctx, active)
 	if err != nil {
-		log.Error(err, "unable to fetch active deployment for BGD")
+		log.Error(err, "unable to fetch active replicaset for BGD")
 		return ctrl.Result{}, err
 	}
 
 	promotionLabelName := "aca.com/promotion-status"
 	promotionLabelValue := "progressing"
-	if len(activeDeploys.Items) == 0 || (len(activeDeploys.Items) == 1 && activeDeploys.Items[0].Labels[promotionLabelName] != promotionLabelValue) {
+	if len(activeReplicaSets.Items) == 0 || (len(activeReplicaSets.Items) == 1 && activeReplicaSets.Items[0].Labels[promotionLabelName] != promotionLabelValue) {
 		color := "active"
-		activeDeploy := r.deploymentForBGD(&bgd, color, active)
-		activeDeploy.Labels[promotionLabelName] = promotionLabelValue
-		err = r.Create(ctx, &activeDeploy)
+		activeRs := r.replicaSetForBGD(bgd, color, active)
+		activeRs.Labels[promotionLabelName] = promotionLabelValue
+		err = r.Create(ctx, &activeRs)
 		if err != nil {
-			log.Error(err, "unable to create active deployment")
+			log.Error(err, "unable to create active replicaset")
 			return ctrl.Result{}, err
 		}
 
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil // requeue to continue promotion in next loop
 	}
 
-	var progressingDeploy appsv1.Deployment
-	for _, d := range activeDeploys.Items {
-		if d.Labels[promotionLabelName] == promotionLabelValue {
-			progressingDeploy = d
+	var progressingRs appsv1.ReplicaSet
+	for _, rs := range activeReplicaSets.Items {
+		if rs.Labels[promotionLabelName] == promotionLabelValue {
+			progressingRs = rs
 			break
 		}
 	}
-	progressingDeploy.Spec.Template = bgd.Spec.Deployment.Template
-	progressingDeploy.Spec.Replicas = bgd.Spec.Deployment.Replicas
-	progressingDeploy.Labels = r.deploymentLabel(bgd.Spec.Deployment.Template.Labels, "active", true)
+	progressingRs.Spec.Template = bgd.Spec.Deployment.Template
+	progressingRs.Spec.Replicas = bgd.Spec.Deployment.Replicas
+	progressingRs.Labels = r.replicaSetLabel(bgd.Spec.Deployment.Template.Labels, "active", true)
 
-	var depromotingDeploy appsv1.Deployment
-	for _, d := range activeDeploys.Items {
-		if d.Labels[promotionLabelName] == "depromoting" {
-			depromotingDeploy = d
+	var depromotingRs appsv1.ReplicaSet
+	for _, rs := range activeReplicaSets.Items {
+		if rs.Labels[promotionLabelName] == "depromoting" {
+			depromotingRs = rs
 			break
 		}
 	}
-	if depromotingDeploy.Labels == nil {
-		depromotingDeploy.Labels = make(map[string]string)
+	if depromotingRs.Labels == nil {
+		depromotingRs.Labels = make(map[string]string)
 	}
-	depromotingDeploy.Labels[promotionLabelName] = "depromoting"
+	depromotingRs.Labels[promotionLabelName] = "depromoting"
 
 	active = false
-	inactiveDeploys, err := r.listDeploymentsForBGD(ctx, active)
+	inactiveRss, err := r.listReplicaSetsForBGD(ctx, active)
 	if err != nil {
-		log.Error(err, "unable to fetch green deployment for BGD")
+		log.Error(err, "unable to fetch green replicaset for BGD")
 		return ctrl.Result{}, err
 	}
 
-	preview := inactiveDeploys.Items[0]
+	preview := inactiveRss.Items[0]
 	replicas := int32(0)
 	preview.Spec.Replicas = &replicas
 
@@ -271,12 +271,12 @@ func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context
 	activeService.Spec = bgd.Spec.Service.ServiceSpec
 
 	if result, err := r.retryUpdateOnConflict(ctx, "update deployments during promotion", func() error {
-		if err := r.Update(ctx, &progressingDeploy); err != nil {
+		if err := r.Update(ctx, &progressingRs); err != nil {
 			return errors.Join(err, promoteProgressingError{})
 		}
 
-		if depromotingDeploy.Name != "" { // could be empty if this is the first ever promotion
-			if err := r.Update(ctx, &depromotingDeploy); err != nil {
+		if depromotingRs.Name != "" { // could be empty if this is the first ever promotion
+			if err := r.Update(ctx, &depromotingRs); err != nil {
 				return errors.Join(err, promoteDepromoteUpdateError{})
 			}
 		}
@@ -294,31 +294,31 @@ func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context
 		switch err.(type) {
 		case promoteProgressingError:
 			addStatusCondition(
-				&bgd,
+				bgd,
 				learningv1alpha1.ConditionPromoting,
 				metav1.ConditionFalse,
 				learningv1alpha1.ReasonRolloutFailed,
-				"Failed to update progressing deployment during promotion",
+				"Failed to update progressing replicaset during promotion",
 			)
 		case promoteDepromoteUpdateError:
 			addStatusCondition(
-				&bgd,
+				bgd,
 				learningv1alpha1.ConditionPromoting,
 				metav1.ConditionFalse,
 				learningv1alpha1.ReasonRolloutFailed,
-				"Failed to update active deployment during promotion",
+				"Failed to update active replicaset during promotion",
 			)
 		case promotePreviewUpdateError:
 			addStatusCondition(
-				&bgd,
+				bgd,
 				learningv1alpha1.ConditionPromoting,
 				metav1.ConditionFalse,
 				learningv1alpha1.ReasonRolloutFailed,
-				"Failed to update preview deployment during promotion",
+				"Failed to update preview replicaset during promotion",
 			)
 		case deployServiceUpdateError:
 			addStatusCondition(
-				&bgd,
+				bgd,
 				learningv1alpha1.ConditionPromoting,
 				metav1.ConditionFalse,
 				learningv1alpha1.ReasonRolloutFailed,
@@ -333,22 +333,22 @@ func (r *BlueGreenDeploymentReconciler) handlePromotingPhase(ctx context.Context
 
 	bgd.Status.Phase = learningv1alpha1.PhaseCleaningUp
 	addStatusCondition(
-		&bgd,
+		bgd,
 		learningv1alpha1.ConditionPromoting,
 		metav1.ConditionTrue,
 		learningv1alpha1.ReasonServiceUpdated,
-		"Service updated to point to new deployment, cleaning up old resources",
+		"Service updated to point to new replicaset, cleaning up old resources",
 	)
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) handleDeployingPhase(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
+func (r *BlueGreenDeploymentReconciler) handleDeployingPhase(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	active := false
 	color := "green"
-	deploys, err := r.listDeploymentsForBGD(ctx, active)
+	deploys, err := r.listReplicaSetsForBGD(ctx, active)
 	if err != nil {
-		log.Error(err, "unable to fetch preview deployment for BGD")
+		log.Error(err, "unable to fetch preview replicaset for BGD")
 		return ctrl.Result{}, err
 	}
 
@@ -377,37 +377,37 @@ func (r *BlueGreenDeploymentReconciler) handleDeployingPhase(ctx context.Context
 	if serviceReady && deploy.Status.ReadyReplicas == *deploy.Spec.Replicas {
 		bgd.Status.Phase = learningv1alpha1.PhaseRunTests
 		addStatusCondition(
-			&bgd,
+			bgd,
 			learningv1alpha1.ConditionRunTests,
 			metav1.ConditionTrue,
 			learningv1alpha1.ReasonDeploymentCreated,
-			"Deployment and Service are ready, proceed with tests",
+			"ReplicaSet and Service are ready, proceed with tests",
 		)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) handlePendingPhase(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
+func (r *BlueGreenDeploymentReconciler) handlePendingPhase(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.Info("updating preview deployment")
+	log.Info("updating preview replicaset")
 	active := false
 	color := "green"
-	deploys, err := r.listDeploymentsForBGD(ctx, active)
+	deploys, err := r.listReplicaSetsForBGD(ctx, active)
 	if err != nil {
-		log.Error(err, "unable to fetch active deployment for BGD")
+		log.Error(err, "unable to fetch active replicaset for BGD")
 		return ctrl.Result{}, err
 	}
 
 	deploy := deploys.Items[0]
 	deploy.Spec.Template = bgd.Spec.Deployment.Template
-	deploy.Labels = r.deploymentLabel(bgd.Spec.Deployment.Template.Labels, color, active)
+	deploy.Labels = r.replicaSetLabel(bgd.Spec.Deployment.Template.Labels, color, active)
 	deploy.Spec.Replicas = bgd.Spec.Deployment.Replicas
 	err = r.Update(ctx, &deploy)
 	if err != nil {
-		log.Error(err, "unable to update preview deployment")
+		log.Error(err, "unable to update preview replicaset")
 		return ctrl.Result{}, err
 	}
-	log.Info("preview deployment updated successfully")
+	log.Info("preview replicaset updated successfully")
 
 	log.Info("creating preview service")
 	svcs, err := r.listServicesForBGD(ctx, color)
@@ -430,7 +430,7 @@ func (r *BlueGreenDeploymentReconciler) handlePendingPhase(ctx context.Context, 
 
 	bgd.Status.Phase = learningv1alpha1.PhaseDeploying
 	addStatusCondition(
-		&bgd,
+		bgd,
 		learningv1alpha1.ConditionDeploying,
 		metav1.ConditionTrue,
 		learningv1alpha1.ReasonDeploymentCreated,
@@ -439,21 +439,21 @@ func (r *BlueGreenDeploymentReconciler) handlePendingPhase(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) handleEmptyPhase(ctx context.Context, bgd learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
+func (r *BlueGreenDeploymentReconciler) handleEmptyPhase(ctx context.Context, bgd *learningv1alpha1.BlueGreenDeployment) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.Info("creating preview deployment")
+	log.Info("creating preview replicaset")
 	active := false
 	color := "green"
-	d := r.deploymentForBGD(&bgd, color, active)
+	rs := r.replicaSetForBGD(bgd, color, active)
 
-	err := r.Create(ctx, &d)
+	err := r.Create(ctx, &rs)
 	if err != nil {
-		log.Error(err, "unable to create deployment")
+		log.Error(err, "unable to create replicaset")
 		return ctrl.Result{}, err
 	}
 
 	log.Info("creating green service")
-	s := r.serviceForBGD(&bgd, color, active)
+	s := r.serviceForBGD(bgd, color, active)
 	err = r.Create(ctx, &s)
 	if err != nil {
 		log.Error(err, "unable to create service")
@@ -462,7 +462,7 @@ func (r *BlueGreenDeploymentReconciler) handleEmptyPhase(ctx context.Context, bg
 
 	bgd.Status.Phase = learningv1alpha1.PhaseDeploying
 	addStatusCondition(
-		&bgd,
+		bgd,
 		learningv1alpha1.ConditionDeploying,
 		metav1.ConditionTrue,
 		learningv1alpha1.ReasonDeploymentCreated,
@@ -471,15 +471,15 @@ func (r *BlueGreenDeploymentReconciler) handleEmptyPhase(ctx context.Context, bg
 	return ctrl.Result{}, nil
 }
 
-func (r *BlueGreenDeploymentReconciler) listDeploymentsForBGD(ctx context.Context, active bool) (appsv1.DeploymentList, error) {
-	deploys := appsv1.DeploymentList{}
+func (r *BlueGreenDeploymentReconciler) listReplicaSetsForBGD(ctx context.Context, active bool) (appsv1.ReplicaSetList, error) {
+	rss := appsv1.ReplicaSetList{}
 	labelSelector := client.MatchingLabels{
 		"active": strconv.FormatBool(active),
 	}
-	if err := r.List(ctx, &deploys, labelSelector); err != nil {
-		return deploys, err
+	if err := r.List(ctx, &rss, labelSelector); err != nil {
+		return rss, err
 	}
-	return deploys, nil
+	return rss, nil
 }
 
 func (r *BlueGreenDeploymentReconciler) listServicesForBGD(ctx context.Context, color string) (corev1.ServiceList, error) {
@@ -517,7 +517,7 @@ func (*BlueGreenDeploymentReconciler) checkExternalNameServiceTypeStatus(service
 	return service.Spec.ExternalName != ""
 }
 
-func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.Deployment {
+func (r *BlueGreenDeploymentReconciler) replicaSetForBGD(bgd *learningv1alpha1.BlueGreenDeployment, color string, active bool) appsv1.ReplicaSet {
 	spec := *bgd.Spec.Deployment.DeepCopy()
 	selector := spec.Selector
 	if selector.MatchLabels == nil {
@@ -527,11 +527,11 @@ func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.B
 	selector.MatchLabels["color"] = color
 	spec.Selector = selector
 
-	spec.Template.ObjectMeta.Labels = r.deploymentLabel(spec.Template.Labels, color, active)
+	spec.Template.ObjectMeta.Labels = r.replicaSetLabel(spec.Template.Labels, color, active)
 
 	bgd.Spec.Deployment = spec
 
-	d := appsv1.Deployment{
+	rs := appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: color + bgd.Name + "-", // K8s will append a random suffix
 			Namespace:    bgd.Namespace,
@@ -544,12 +544,15 @@ func (r *BlueGreenDeploymentReconciler) deploymentForBGD(bgd *learningv1alpha1.B
 				*metav1.NewControllerRef(bgd, bgd.GroupVersionKind()),
 			},
 		},
-		Spec: *bgd.Spec.Deployment.DeploymentSpec.DeepCopy(),
+		Spec: appsv1.ReplicaSetSpec{
+			Selector: spec.Selector.DeepCopy(),
+			Template: *spec.Template.DeepCopy(),
+		},
 	}
-	return d
+	return rs
 }
 
-func (*BlueGreenDeploymentReconciler) deploymentLabel(bgdLabels map[string]string, color string, active bool) map[string]string {
+func (*BlueGreenDeploymentReconciler) replicaSetLabel(bgdLabels map[string]string, color string, active bool) map[string]string {
 	templateLabels := bgdLabels
 	if templateLabels == nil {
 		templateLabels = make(map[string]string)
