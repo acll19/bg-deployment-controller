@@ -99,11 +99,20 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.
 				return ctrl.Result{}, err
 			}
 		} else if rs.Annotations["specHash"] != specHash {
-			log.Info("Deployment spec has changed, moving to Pending phase")
+			log.Info("ReplicaSet spec has changed, moving to Pending phase")
 			bgd.Status.Phase = learningv1alpha1.PhasePending
 			rs.Annotations["specHash"] = specHash
 			if err = r.Update(ctx, &rs); err != nil {
 				log.Error(err, "unable to update replicaset with new specHash label")
+				return ctrl.Result{}, err
+			}
+		}
+
+		if bgd.Spec.Deployment.Replicas != nil && *bgd.Spec.Deployment.Replicas != *rs.Spec.Replicas {
+			log.Info("Replica count has changed. Updating blue replicaset")
+			rs.Spec.Replicas = bgd.Spec.Deployment.Replicas
+			if err = r.Update(ctx, &rs); err != nil {
+				log.Error(err, "unable to update replicaset with new replica count")
 				return ctrl.Result{}, err
 			}
 		}
